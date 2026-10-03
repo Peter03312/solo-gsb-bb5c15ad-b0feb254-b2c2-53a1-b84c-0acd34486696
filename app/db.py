@@ -25,6 +25,12 @@ CREATE TABLE IF NOT EXISTS courses (
     coreqs TEXT NOT NULL DEFAULT '[]',        -- JSON: [code, ...]
     PRIMARY KEY (version_id, code)
 );
+CREATE TABLE IF NOT EXISTS equivalence_groups (
+    version_id INTEGER NOT NULL REFERENCES catalog_versions(id),
+    group_no INTEGER NOT NULL,                -- 组序号（版本内从 1 起）
+    code TEXT NOT NULL,                       -- 组内课程代码
+    PRIMARY KEY (version_id, group_no, code)
+);
 CREATE TABLE IF NOT EXISTS plans (
     id TEXT PRIMARY KEY,
     version_id INTEGER NOT NULL REFERENCES catalog_versions(id),
@@ -85,8 +91,8 @@ def init_db():
             create_catalog_version(conn, "初始目录", SEED_COURSES)
 
 
-def create_catalog_version(conn, note, courses):
-    """全量提交一套课程，形成新的目录版本，返回版本号。"""
+def create_catalog_version(conn, note, courses, equiv_groups=None):
+    """全量提交一套课程（可选课程互认组），形成新的目录版本，返回版本号。"""
     cur = conn.execute(
         "INSERT INTO catalog_versions (note, created_at) VALUES (?, ?)", (note, _now()))
     vid = cur.lastrowid
@@ -101,6 +107,12 @@ def create_catalog_version(conn, note, courses):
                 json.dumps(c.get("coreqs", []), ensure_ascii=False),
             ),
         )
+    for group_no, group in enumerate(equiv_groups or [], start=1):
+        for code in group:
+            conn.execute(
+                "INSERT INTO equivalence_groups (version_id, group_no, code) VALUES (?,?,?)",
+                (vid, group_no, code),
+            )
     return vid
 
 
@@ -126,6 +138,17 @@ def load_courses(conn, version_id):
         }
         for r in rows
     ]
+
+
+def load_equivalence_groups(conn, version_id):
+    """该目录版本声明的课程互认组：[[code, ...], ...]；未声明时为空列表。"""
+    rows = conn.execute(
+        "SELECT group_no, code FROM equivalence_groups WHERE version_id=?"
+        " ORDER BY group_no, code", (version_id,)).fetchall()
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["group_no"], []).append(r["code"])
+    return [groups[no] for no in sorted(groups)]
 
 
 def insert_plan(conn, plan_id, version_id, request, result):

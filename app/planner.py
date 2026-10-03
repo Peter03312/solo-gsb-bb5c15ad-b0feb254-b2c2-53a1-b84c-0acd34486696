@@ -8,6 +8,11 @@
   必须安排在指定学期；锁定学期须在规划期限内，且不得与开课季节、同修同学期、
   不可排课学期等约束冲突。
 - 可选不可排课学期：该学期不安排任何课程。
+- 可选课程互认组：组内课程可相互替代满足目标课程与先修组选项；已修同组课程
+  视为已满足，未修时择一实际修读（所选课仍受自身开课季节、学分、先修及同修
+  约束，替代先修须在被依赖课程之前完成）；同组课程被多个目标或先修组引用时
+  一次修读即可满足。互认不豁免同修与锁定：同修仍按指定课程同学期修读（已修
+  除外），锁定仍要求指定课程在指定学期修读。未声明互认组时行为与之前一致。
 - 目标：在规划期限（num_semesters）内最早完成；完成学期相同者，按“各学期课程
   代码序列”（每学期内代码升序、再按学期先后组成元组）的字典序取最小者。
 """
@@ -75,15 +80,33 @@ def semester_index(start_year, start_season, label):
 
 # ---------------------------------------------------------------- 候选课程集合
 
-def _enumerate_sets(catalog, completed, needed):
-    """枚举满足全部先修组与同修闭包的候选课程集合。
+def _equiv_lookup(equiv_groups):
+    """由互认组列表构建 code -> 同组课程集合（含自身）的映射；不在组内的课程无映射。"""
+    equiv = {}
+    for group in equiv_groups or []:
+        members = frozenset(str(c).strip().upper() for c in group)
+        for c in members:
+            equiv[c] = members
+    return equiv
 
+
+def _enumerate_sets(catalog, completed, exact, target_reqs, equiv):
+    """枚举满足全部目标要求、先修组与同修闭包的候选课程集合。
+
+    exact：必须实际修读的指定课程（锁定课程），不接受互认替代；
+    target_reqs：目标课程要求（可接受课程集合列表），每个集合任选一门实际修读
+    即满足，同组课程被多个目标引用时一次修读即可满足（相同集合已去重）；
+    先修组内选项的同组课程同样可选。已修课程不重复排入。
     返回 (leaves, conflicts)：leaves 为 frozenset 列表；conflicts 为枚举过程中
     发现的条件冲突原因（供全部失败时向用户说明）。
     """
     leaves = []
     conflicts = []
     seen = set()
+
+    def group_of(code):
+        g = equiv.get(code)
+        return g if g is not None else frozenset({code})
 
     def close_coreqs(courses):
         result = set(courses)
@@ -107,12 +130,28 @@ def _enumerate_sets(catalog, completed, needed):
         if courses is None or courses in seen:
             return
         seen.add(courses)
+        # 目标课程要求：组内任选一门实际修读（同组课程一次修读即可满足）
+        for req in target_reqs:
+            if req & courses:
+                continue
+            options = sorted(o for o in req if o in catalog and o not in completed)
+            if not options:
+                conflicts.append(
+                    f"目标课程 {'、'.join(sorted(req))} 在目录中无可选课程，条件冲突")
+                return
+            for opt in options:
+                rec(courses | {opt})
+            return
+        # 先修组：组内选项的同组课程同样可选（替代先修仍须在被依赖课程之前完成）
         for code in sorted(courses):
             for group in catalog[code].prereq_groups:
-                if any(o in completed or o in courses for o in group):
+                acceptable = set()
+                for o in group:
+                    acceptable |= group_of(o)
+                if any(o in completed or o in courses for o in acceptable):
                     continue
                 # 该组尚未满足：枚举可选课程（目录中不存在或已修的选项不可再选）
-                options = sorted(o for o in group if o in catalog and o not in completed)
+                options = sorted(o for o in acceptable if o in catalog and o not in completed)
                 if not options:
                     conflicts.append(
                         f"课程 {code} 的先修组 [{'、'.join(group)}] 在目录中无可选课程，条件冲突")
@@ -122,7 +161,7 @@ def _enumerate_sets(catalog, completed, needed):
                 return
         leaves.append(courses)
 
-    rec(frozenset(needed))
+    rec(frozenset(exact))
     return leaves, conflicts
 
 
@@ -177,8 +216,11 @@ def _build_blocks(catalog, courses):
     return blocks
 
 
-def _block_requirements(catalog, completed, blocks):
-    """每个块的先修要求：列表的每项是一个块编号集合，须至少一个块排在更早学期。"""
+def _block_requirements(catalog, completed, blocks, equiv):
+    """每个块的先修要求：列表的每项是一个块编号集合，须至少一个块排在更早学期。
+
+    先修组内选项的同组课程同样满足该组；替代先修仍须排在被依赖课程之前。
+    """
     block_of = {}
     for bi, b in enumerate(blocks):
         for c in b.members:
@@ -188,9 +230,13 @@ def _block_requirements(catalog, completed, blocks):
         rb = []
         for c in b.members:
             for group in catalog[c].prereq_groups:
-                if any(o in completed for o in group):
+                acceptable = set()
+                for o in group:
+                    g = equiv.get(o)
+                    acceptable |= g if g is not None else {o}
+                if any(o in completed for o in acceptable):
                     continue
-                opts = frozenset(block_of[o] for o in group if o in block_of)
+                opts = frozenset(block_of[o] for o in acceptable if o in block_of)
                 if not opts:  # 防御：闭包阶段已保证每组有可选课程
                     return None
                 rb.append(opts)
@@ -334,7 +380,7 @@ def _deadlocked_codes(blocks, reqs):
 # ---------------------------------------------------------------- 主入口
 
 def build_plan(catalog, completed, targets, start_semester, max_credits, num_semesters,
-               locked=None, unavailable=None):
+               locked=None, unavailable=None, equiv_groups=None):
     """生成完整方案；失败抛出 PlanError（不返回部分课表）。
 
     catalog:     {code: Course}
@@ -343,12 +389,19 @@ def build_plan(catalog, completed, targets, start_semester, max_credits, num_sem
     locked:      可选锁定安排，(课程代码, 学期标签) 列表；锁定课程视为本次必修，
                  必须安排在指定学期，且学期须在规划期限内
     unavailable: 可选不可排课学期标签列表，这些学期不安排任何课程
+    equiv_groups: 可选课程互认组（课程代码列表的列表）；组内课程可相互替代满足
+                 目标课程与先修组选项，但不豁免同修与锁定；未声明时行为不变
     """
     start_year, start_season = parse_semester(start_semester)
     targets = list(dict.fromkeys(t.strip().upper() for t in targets))
     completed = {c.strip().upper() for c in completed}
     locked = locked or []
     unavailable = unavailable or []
+    equiv = _equiv_lookup(equiv_groups)
+
+    def group_of(code):
+        g = equiv.get(code)
+        return g if g is not None else frozenset({code})
 
     missing = [t for t in targets if t not in catalog]
     if missing:
@@ -389,8 +442,20 @@ def build_plan(catalog, completed, targets, start_semester, max_credits, num_sem
                 f"锁定课程 {code} 的学期 {label} 为不可排课学期，锁定与约束冲突")
 
     locked_codes = {code for code, _, _ in lock_items}
-    needed = (set(targets) | locked_codes) - completed  # 锁定课程视为本次必修
-    if not needed:
+
+    # 目标课程要求：已修同组课程视为已满足且不重复排课；未满足者按可替代课程
+    # 集合记录，同组课程被多个目标引用时一次修读即可满足（相同集合去重）
+    target_reqs = []
+    seen_reqs = set()
+    for t in targets:
+        acceptable = group_of(t)
+        if acceptable & completed:
+            continue
+        if acceptable not in seen_reqs:
+            seen_reqs.add(acceptable)
+            target_reqs.append(acceptable)
+
+    if not locked_codes and not target_reqs:  # 锁定课程视为本次必修
         return {
             "completion_semester": None,
             "total_credits": 0,
@@ -398,7 +463,7 @@ def build_plan(catalog, completed, targets, start_semester, max_credits, num_sem
             "message": "目标课程均已完成，无需排课",
         }
 
-    leaves, conflicts = _enumerate_sets(catalog, completed, needed)
+    leaves, conflicts = _enumerate_sets(catalog, completed, locked_codes, target_reqs, equiv)
     best = None
     no_solution_notes = []
 
@@ -408,7 +473,7 @@ def build_plan(catalog, completed, targets, start_semester, max_credits, num_sem
         except PlanError as exc:
             conflicts.append(exc.message)
             continue
-        reqs = _block_requirements(catalog, completed, blocks)
+        reqs = _block_requirements(catalog, completed, blocks, equiv)
         if reqs is None:
             conflicts.append("先修条件无法满足，条件冲突")
             continue

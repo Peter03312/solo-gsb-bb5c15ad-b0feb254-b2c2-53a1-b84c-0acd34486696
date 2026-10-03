@@ -1,7 +1,7 @@
 """请求体的 Pydantic 模型与校验。非法输入（空目标、非正学分/上限等）一律拒绝。"""
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Season = Literal["SPRING", "FALL"]
 
@@ -46,10 +46,18 @@ class CourseIn(BaseModel):
 
 
 class CatalogIn(BaseModel):
-    """目录修订：全量提交一套课程，形成新版本。"""
+    """目录修订：全量提交一套课程，形成新版本。
+
+    可选 equivalence_groups 声明互不重叠的课程互认组：组内课程可相互替代满足
+    目标课程与先修组选项。互认组含不存在课程、课程重复归组或少于两门课程时，
+    提交被拒绝且不生成新版本。
+    """
 
     note: str = ""
     courses: list[CourseIn] = Field(min_length=1)
+    equivalence_groups: list[list[str]] = Field(
+        default_factory=list,
+        description="课程互认组：组内课程可相互替代满足目标与先修；各组互不重叠")
 
     @field_validator("courses")
     @classmethod
@@ -58,6 +66,35 @@ class CatalogIn(BaseModel):
         if len(codes) != len(set(codes)):
             raise ValueError("课程代码重复")
         return v
+
+    @field_validator("equivalence_groups")
+    @classmethod
+    def check_equiv_groups(cls, v):
+        groups = []
+        assigned = set()
+        for g in v:
+            members = [_norm_code(x) for x in g if str(x).strip()]
+            if len(set(members)) != len(members):
+                dup = sorted({m for m in members if members.count(m) > 1})
+                raise ValueError(f"课程 {'、'.join(dup)} 重复归组")
+            if len(members) < 2:
+                raise ValueError("互认组至少需要两门课程")
+            overlap = sorted(set(members) & assigned)
+            if overlap:
+                raise ValueError(
+                    f"课程 {'、'.join(overlap)} 重复归组：互认组之间不得重叠")
+            assigned.update(members)
+            groups.append(sorted(members))
+        return groups
+
+    @model_validator(mode="after")
+    def check_equiv_courses_exist(self):
+        codes = {c.code for c in self.courses}
+        for g in self.equivalence_groups:
+            missing = [m for m in g if m not in codes]
+            if missing:
+                raise ValueError(f"互认组包含目录中不存在的课程：{'、'.join(missing)}")
+        return self
 
 
 class LockedPlacement(BaseModel):

@@ -188,3 +188,57 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST "$BASE/plans" -H 'Content-Type: appli
   "max_credits_per_semester": 12, "num_semesters": 4,
   "locked": [{"course": "MATH103", "semester": "2027-SPRING"}]
 }'
+
+step "28. 目录修订引入课程互认组（生成版本 3：CS201 仅秋季开课，新增 CS201B 并声明 CS201~CS201B 互认）"
+curl -s -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' \
+  -d @"$HERE/catalog_v3.json"; echo
+
+step "29. 互认替代：目标 CS201（仅秋季开课），同组 CS201B 春秋均开课 -> 实际修读 CS201B，提前完成"
+curl -s -X POST "$BASE/plans" -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L"],
+  "target_courses": ["CS201"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 4
+}'; echo
+
+step "30. 已修同组课程视为已满足：已修 CS201B，目标 CS201 -> 无需排课"
+curl -s -X POST "$BASE/plans" -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L", "CS201B"],
+  "target_courses": ["CS201"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 4
+}'; echo
+
+step "31. 互认替代先修：CS301 先修组 [CS201, CS202] 可由同组 CS201B 满足（替代先修须排在 CS301 之前）"
+curl -s -X POST "$BASE/plans" -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L", "MATH103"],
+  "target_courses": ["CS301"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 4
+}'; echo
+
+step "32. 错误示例：互认组含不存在课程（422，不生成版本）"
+curl -s -w '\nHTTP %{http_code}\n' -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' -d '{
+  "note": "bad",
+  "courses": [{"code": "A", "credits": 3, "semesters": ["SPRING"]},
+              {"code": "B", "credits": 3, "semesters": ["SPRING"]}],
+  "equivalence_groups": [["A", "NOPE999"]]
+}'
+
+step "33. 错误示例：课程重复归组（422，不生成版本）"
+curl -s -w '\nHTTP %{http_code}\n' -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' -d '{
+  "note": "bad",
+  "courses": [{"code": "A", "credits": 3, "semesters": ["SPRING"]},
+              {"code": "B", "credits": 3, "semesters": ["SPRING"]},
+              {"code": "C", "credits": 3, "semesters": ["SPRING"]}],
+  "equivalence_groups": [["A", "B"], ["B", "C"]]
+}'
+
+step "34. 错误示例：互认组少于两门课程（422，不生成版本）"
+curl -s -w '\nHTTP %{http_code}\n' -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' -d '{
+  "note": "bad",
+  "courses": [{"code": "A", "credits": 3, "semesters": ["SPRING"]},
+              {"code": "B", "credits": 3, "semesters": ["SPRING"]}],
+  "equivalence_groups": [["A"]]
+}'
+
+step "35. 当前目录版本（上述非法提交均被拒绝，仍为版本 3 及其互认组）"
+curl -s "$BASE/catalog/current" | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); print('version:', d['version_id'], 'equivalence_groups:', d['equivalence_groups'])"
