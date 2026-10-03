@@ -54,8 +54,12 @@ def remaining_diff(original_result, new_result, elapsed_semesters):
     }
 
 
-def replan_plan(catalog, original_request, original_result, elapsed_semesters, completed):
-    """执行滚动重排，返回 (effective_request, result, diff)；失败抛出 PlanError。"""
+def replan_plan(catalog, original_request, original_result, elapsed_semesters, completed,
+                equiv_groups=None):
+    """执行滚动重排，返回 (effective_request, result, diff)；失败抛出 PlanError。
+
+    equiv_groups 为重排所使用目录版本声明的课程互认组（按当前目录判断互认）。
+    """
     if elapsed_semesters >= int(original_request["num_semesters"]):
         raise PlanError(
             "INVALID_INPUT",
@@ -87,6 +91,7 @@ def replan_plan(catalog, original_request, original_result, elapsed_semesters, c
         start_semester=start_label,
         max_credits=int(original_request["max_credits_per_semester"]),
         num_semesters=remaining,
+        equiv_groups=equiv_groups,
     )
     diff = remaining_diff(original_result, result, elapsed_semesters)
     return effective_request, result, diff

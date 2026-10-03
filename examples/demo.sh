@@ -188,3 +188,64 @@ curl -s -w '\nHTTP %{http_code}\n' -X POST "$BASE/plans" -H 'Content-Type: appli
   "max_credits_per_semester": 12, "num_semesters": 4,
   "locked": [{"course": "MATH103", "semester": "2027-SPRING"}]
 }'
+
+step "28. 课程互认组：目录修订声明互认组（CS301/CS302、CS401/CS402），生成版本 3"
+curl -s -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' \
+  -d @"$HERE/catalog_v3_equiv.json"; echo
+echo "当前目录（含 equivalence_groups）："
+curl -s "$BASE/catalog/current"; echo
+
+step "29. 互认：已修同组课程视为已满足——已修 CS302 视同满足 CS301，CS401 直接可排"
+curl -s -X POST "$BASE/plans" -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L", "CS201", "MATH103", "CS302"],
+  "target_courses": ["CS401"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 6
+}'; echo
+
+step "30. 互认：目标替代——目标 CS401，实际择修同组的 CS402（春季即可，方案列出实际修读课程）"
+curl -s -X POST "$BASE/plans" -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L", "CS201", "MATH101", "MATH102", "MATH103", "CS301"],
+  "target_courses": ["CS401"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 6
+}'; echo
+
+step "31. 互认：一次修读满足多处引用——目标 CS301 与 CS302 同组，修读一门即可"
+curl -s -X POST "$BASE/plans" -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L", "CS201", "MATH103"],
+  "target_courses": ["CS301", "CS302"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 6
+}'; echo
+
+step "32. 互认不豁免锁定：CS401 锁定到春季（仅秋季开课），同组 CS402 不能顶替（422 REQUIREMENT_CONFLICT）"
+curl -s -w '\nHTTP %{http_code}\n' -X POST "$BASE/plans" -H 'Content-Type: application/json' -d '{
+  "target_courses": ["CS401"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 6,
+  "locked": [{"course": "CS401", "semester": "2027-SPRING"}]
+}'
+
+step "33. 滚动重排按当前目录判断互认：方案 A 执行 2 学期后已修 CS302（CS301 同组），重排不再排 CS301"
+curl -s -X POST "$BASE/plans/$PLAN_A_ID/replan" -H 'Content-Type: application/json' -d '{
+  "elapsed_semesters": 2,
+  "completed_courses": ["CS101", "CS101L", "CS201", "MATH103", "CS302"]
+}'; echo
+
+step "34. 错误示例：互认组含不存在课程 / 重复归组 / 少于两门（422，不生成版本）"
+curl -s -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' -d '{
+  "courses": [{"code": "X1", "credits": 2, "semesters": ["SPRING"]}],
+  "equivalence_groups": [["X1", "NOPE"]]
+}'; echo
+curl -s -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' -d '{
+  "courses": [{"code": "X1", "credits": 2, "semesters": ["SPRING"]},
+              {"code": "X2", "credits": 2, "semesters": ["SPRING"]},
+              {"code": "X3", "credits": 2, "semesters": ["SPRING"]}],
+  "equivalence_groups": [["X1", "X2"], ["X2", "X3"]]
+}'; echo
+curl -s -X POST "$BASE/catalog/versions" -H 'Content-Type: application/json' -d '{
+  "courses": [{"code": "X1", "credits": 2, "semesters": ["SPRING"]}],
+  "equivalence_groups": [["X1"]]
+}'; echo
+echo "当前目录版本（应仍为 3，未因非法提交生成新版本）："
+curl -s "$BASE/catalog/current" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['version_id'], d['equivalence_groups'])"
+
+step "35. 回看：历史目录版本保持原语义（版本 1 无互认组）"
+curl -s "$BASE/catalog/versions/1" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['version_id'], d['equivalence_groups'])"

@@ -85,7 +85,10 @@ def health():
 
 @app.post("/catalog/versions", status_code=201)
 def create_catalog(payload: CatalogIn):
-    """目录修订：全量提交课程集合，生成新版本并成为当前版本。"""
+    """目录修订：全量提交课程集合（可选互不重叠的课程互认组），生成新版本并成为当前版本。
+
+    互认组含不存在课程、重复归组或少于两门时拒绝（422），不生成版本。
+    """
     courses = [
         {
             "code": c.code, "name": c.name, "credits": c.credits,
@@ -93,13 +96,15 @@ def create_catalog(payload: CatalogIn):
         }
         for c in payload.courses
     ]
+    groups = [list(g) for g in payload.equivalence_groups]
     with db.session() as conn:
-        vid = db.create_catalog_version(conn, payload.note, courses)
+        vid = db.create_catalog_version(conn, payload.note, courses, groups)
         version = db.get_version(conn, vid)
     return {
         "version_id": vid,
         "note": version["note"],
         "course_count": len(courses),
+        "equivalence_groups": groups,
         "created_at": version["created_at"],
     }
 
@@ -109,11 +114,13 @@ def current_catalog():
     with db.session() as conn:
         version = db.get_current_version(conn)
         courses = db.load_courses(conn, version["id"])
+        groups = db.load_equiv_groups(conn, version["id"])
     return {
         "version_id": version["id"],
         "note": version["note"],
         "created_at": version["created_at"],
         "courses": courses,
+        "equivalence_groups": groups,
     }
 
 
@@ -126,11 +133,13 @@ def catalog_version(version_id: int):
             raise HTTPException(status_code=404, detail={
                 "code": "NOT_FOUND", "message": f"目录版本 {version_id} 不存在"})
         courses = db.load_courses(conn, version_id)
+        groups = db.load_equiv_groups(conn, version_id)
     return {
         "version_id": version["id"],
         "note": version["note"],
         "created_at": version["created_at"],
         "courses": courses,
+        "equivalence_groups": groups,
     }
 
 
@@ -147,6 +156,7 @@ def create_plan(payload: PlanIn):
     with db.session() as conn:
         version = db.get_current_version(conn)
         catalog = _to_catalog(db.load_courses(conn, version["id"]))
+        equiv_groups = db.load_equiv_groups(conn, version["id"])
         try:
             result = build_plan(
                 catalog,
@@ -157,6 +167,7 @@ def create_plan(payload: PlanIn):
                 num_semesters=payload.num_semesters,
                 locked=[(l.course, l.semester) for l in payload.locked],
                 unavailable=payload.unavailable_semesters,
+                equiv_groups=equiv_groups,
             )
         except PlanError as exc:
             status = 400 if exc.code == "INVALID_INPUT" else 422
@@ -248,6 +259,7 @@ def replan_plan_route(plan_id: str, payload: ReplanIn):
 
         version = db.get_current_version(conn)
         catalog = _to_catalog(db.load_courses(conn, version["id"]))
+        equiv_groups = db.load_equiv_groups(conn, version["id"])
         try:
             effective_request, result, diff = replan_plan(
                 catalog,
@@ -255,6 +267,7 @@ def replan_plan_route(plan_id: str, payload: ReplanIn):
                 original_result=original_result,
                 elapsed_semesters=payload.elapsed_semesters,
                 completed=set(payload.completed_courses),
+                equiv_groups=equiv_groups,
             )
         except PlanError as exc:
             status = 400 if exc.code == "INVALID_INPUT" else 422

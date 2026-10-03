@@ -9,6 +9,8 @@
 - **课程目录**：每门课记录学分、开课季节（`SPRING`/`FALL`，可两者）、先修条件与同修课程。
   - 先修条件按“组”声明：**每组任选一门，各组均须满足**；先修课必须安排在**更早学期**。
   - 同修课程（coreq）尚未修过时，必须与该课**同学期**安排。
+  - 可随版本声明**互不重叠的课程互认组**（见下文「课程互认组」）：组内课程可替代
+    满足目标课程及先修组选项；未声明时行为与之前一致。
 - **规划输入**：已修课程、目标课程（非空）、起始学期（如 `2026-SPRING`）、
   每学期学分上限、规划学期数；可选**锁定安排**（课程+学期）与**不可排课学期**。
   学分与两个上限必须为正，非法输入一律拒绝（422/400）。
@@ -76,8 +78,8 @@ Compose 通过命名卷 `planner-data` 持久化数据。
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 健康检查 |
-| POST | `/catalog/versions` | 目录修订：全量提交课程集合，生成新版本 |
-| GET | `/catalog/current` | 当前目录版本及全部课程 |
+| POST | `/catalog/versions` | 目录修订：全量提交课程集合（可选互认组），生成新版本 |
+| GET | `/catalog/current` | 当前目录版本及全部课程（含互认组） |
 | GET | `/catalog/versions/{id}` | 查看历史目录版本（供回看） |
 | POST | `/plans` | 生成规划方案（绑定当前目录版本；可选锁定安排与不可排课学期） |
 | GET | `/plans` | 方案列表 |
@@ -101,6 +103,76 @@ Compose 通过命名卷 `planner-data` 持久化数据。
 - `credits`：正整数；`semesters`：`SPRING`/`FALL` 至少其一。
 - `prereq_groups`：每个内层数组为一组，组内任选一门，各组均须满足。
 - `coreqs`：同修课程代码列表。
+
+目录提交还可携带可选的 `equivalence_groups`（课程互认组，见下节）；
+`GET /catalog/current` 与 `GET /catalog/versions/{id}` 的响应均含
+`equivalence_groups` 字段（未声明互认组的历史版本返回空列表，其余字段不变）。
+
+### 课程互认组
+
+目录版本可声明**互不重叠的课程互认组**：组内课程可相互替代，满足**目标课程**
+与**先修组选项**。规则：
+
+- **已修同组课程视为已满足**，不重复排课（目标与先修组均适用）。
+- **未修时择一实际修读**：所选课仍受自身开课季节、学分、先修及同修约束；
+  替代先修须安排在被依赖课程**之前**的学期。方案列出实际修读的课程。
+- **一次修读满足多处引用**：同组课程被多个目标或先修组引用时，修读一门即可。
+- **互认不豁免同修与锁定**：同修仍按指定课程同学期修读（已修除外）；
+  锁定安排仍要求指定课程在指定学期修读，同组课程不能顶替。
+- **按目录版本判断**：规划与滚动重排各自按其使用的目录版本判断互认；
+  既有目录与方案回看保持原版本语义。
+- 仍按**最早完成**、同完成学期按实际修读课程代码序列**字典序**取优；
+  无可行替代时说明冲突或期限内无解，不保存部分方案。
+
+提交与校验（含不存在课程、重复归组或少于两门均拒绝 **422**，且不生成版本）：
+
+```bash
+curl -X POST http://localhost:8000/catalog/versions \
+  -H 'Content-Type: application/json' -d @examples/catalog_v3_equiv.json
+# -> 201 {"version_id": 2, "equivalence_groups": [["CS301","CS302"],["CS401","CS402"]], ...}
+```
+
+规划请求字段不变，互认按当前目录版本自动生效：
+
+```bash
+# 已修 CS302（与 CS301 同组）视同满足 CS301，CS401 的先修直接满足
+curl -X POST http://localhost:8000/plans -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L", "CS201", "MATH103", "CS302"],
+  "target_courses": ["CS401"],
+  "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12,
+  "num_semesters": 6
+}'
+# -> 201：2026-FALL 即完成（CS301 不再排入）
+
+# 目标替代：目标 CS401，实际择修同组的 CS402（春季即可修读，方案列出实际修读课程）
+curl -X POST http://localhost:8000/plans -H 'Content-Type: application/json' -d '{
+  "completed_courses": ["CS101", "CS101L", "CS201", "MATH101", "MATH102", "MATH103", "CS301"],
+  "target_courses": ["CS401"],
+  "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12,
+  "num_semesters": 6
+}'
+# -> 201：2026-SPRING 修读 CS402 即完成
+
+# 互认不豁免锁定：CS401 仅秋季开课，锁定到春季时同组 CS402 不能顶替
+curl -X POST http://localhost:8000/plans -H 'Content-Type: application/json' -d '{
+  "target_courses": ["CS401"], "start_semester": "2026-SPRING",
+  "max_credits_per_semester": 12, "num_semesters": 6,
+  "locked": [{"course": "CS401", "semester": "2027-SPRING"}]
+}'
+# -> 422 REQUIREMENT_CONFLICT（锁定与约束冲突）
+```
+
+滚动重排同样按**当前目录版本**判断互认（已修 CS302 后重排，CS301 不再排入）：
+
+```bash
+curl -X POST http://localhost:8000/plans/<plan_id>/replan \
+  -H 'Content-Type: application/json' -d '{
+    "elapsed_semesters": 2,
+    "completed_courses": ["CS101", "CS101L", "CS201", "MATH103", "CS302"]
+  }'
+```
 
 ### 调用示例
 
@@ -310,10 +382,10 @@ curl -X POST http://localhost:8000/plans/<plan_id>/replan \
 
 | code | HTTP | 含义 |
 | --- | --- | --- |
-| `INVALID_INPUT` | 400/422 | 非法输入：空目标、非正学分/上限、学期格式错误、重复锁定、锁定已修课、锁定学期超出规划期限等 |
+| `INVALID_INPUT` | 400/422 | 非法输入：空目标、非正学分/上限、学期格式错误、重复锁定、锁定已修课、锁定学期超出规划期限、互认组含不存在课程/重复归组/少于两门等 |
 | `COURSE_MISSING` | 422 | 课程缺失：目标或锁定课程不在当前目录版本中 |
 | `REQUIREMENT_CONFLICT` | 422 | 条件冲突：先修循环、同修课无共同开课学期、同修课不在目录、锁定与开课季节/同修/不可排课约束冲突等 |
-| `NO_SOLUTION` | 422 | 无解：期限内无法排完（锁定安排、不可排课学期、学分上限/开课季节/先修顺序限制） |
+| `NO_SOLUTION` | 422 | 无解：期限内无法排完（锁定安排、不可排课学期、学分上限/开课季节/先修顺序限制，含全部互认替代均不可行） |
 | `TOO_COMPLEX` | 422 | 组合或搜索超出内置复杂度上限 |
 | `CATALOG_CHANGED` | 409 | 确认（或重排落库）时目录已修订，拒绝且不写入 |
 | `PLAN_NOT_CONFIRMED` | 409 | 对未确认方案发起滚动重排 |
@@ -325,13 +397,13 @@ curl -X POST http://localhost:8000/plans/<plan_id>/replan \
 ```
 app/
   main.py       # FastAPI 路由与错误处理
-  planner.py    # 规划引擎（先修组枚举、同修合并、锁定/不可排课约束、回溯排课、字典序选优）
+  planner.py    # 规划引擎（先修组枚举、互认替代、同修合并、锁定/不可排课约束、回溯排课、字典序选优）
   replan.py     # 执行中途滚动重排（学期顺延、剩余学期课程差异）
-  schemas.py    # 请求模型与校验
-  db.py         # SQLite 持久化（目录版本、方案、重排草案）
+  schemas.py    # 请求模型与校验（含互认组校验）
+  db.py         # SQLite 持久化（目录版本、互认组、方案、重排草案）
   seed_data.py  # 种子课程目录（版本 1）
-tests/          # pytest 单元与 API 集成测试
-examples/       # demo.sh 调用示例、catalog_v2.json 目录修订示例
+tests/          # pytest 单元与 API 集成测试（含课程互认组测试）
+examples/       # demo.sh 调用示例、catalog_v2.json 目录修订示例、catalog_v3_equiv.json 互认组修订示例
 Dockerfile / docker-compose.yml
 ```
 

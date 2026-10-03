@@ -1,7 +1,7 @@
 """请求体的 Pydantic 模型与校验。非法输入（空目标、非正学分/上限等）一律拒绝。"""
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Season = Literal["SPRING", "FALL"]
 
@@ -46,10 +46,14 @@ class CourseIn(BaseModel):
 
 
 class CatalogIn(BaseModel):
-    """目录修订：全量提交一套课程，形成新版本。"""
+    """目录修订：全量提交一套课程（可选互认组），形成新版本。"""
 
     note: str = ""
     courses: list[CourseIn] = Field(min_length=1)
+    equivalence_groups: list[list[str]] = Field(
+        default_factory=list,
+        description="课程互认组：组内课程可替代满足目标课程与先修组选项；"
+                    "组间互不重叠，每组至少两门且均须存在于本次提交的课程中")
 
     @field_validator("courses")
     @classmethod
@@ -58,6 +62,29 @@ class CatalogIn(BaseModel):
         if len(codes) != len(set(codes)):
             raise ValueError("课程代码重复")
         return v
+
+    @field_validator("equivalence_groups")
+    @classmethod
+    def norm_equiv_groups(cls, v):
+        return [sorted({_norm_code(x) for x in g if x.strip()}) for g in v]
+
+    @model_validator(mode="after")
+    def check_equiv_groups(self):
+        """互认组校验：含不存在课程、重复归组或少于两门均拒绝（不生成版本）。"""
+        codes = {c.code for c in self.courses}
+        seen = {}
+        for i, group in enumerate(self.equivalence_groups, start=1):
+            if len(group) < 2:
+                raise ValueError(f"互认组 {i} 少于两门课程，无法成组")
+            missing = [c for c in group if c not in codes]
+            if missing:
+                raise ValueError(f"互认组 {i} 包含不存在的课程：{'、'.join(missing)}")
+            for c in group:
+                if c in seen:
+                    raise ValueError(
+                        f"课程 {c} 被重复归入互认组（第 {seen[c]}、{i} 组），互认组不得重叠")
+                seen[c] = i
+        return self
 
 
 class LockedPlacement(BaseModel):
